@@ -11,7 +11,7 @@ func main() {
 
 	r.Use(ginprom.Middleware())
 
-	r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandler(ginprom.WithBasicAuth("test", "test"))))
+	r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandler(ginprom.WithBasicAuth("atest", "test"))))
 
 	r.GET("/", func(c *gin.Context) {
 		c.String(200, "Hello World")

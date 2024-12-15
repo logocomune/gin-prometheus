@@ -1,6 +1,7 @@
 package ginprom
 
 import (
+	"fmt"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/http"
 )
@@ -24,8 +25,9 @@ func WithBasicAuth(username, password string) HandlerOption {
 func GetMetricHandler(opt ...HandlerOption) http.Handler {
 	conf := handlerConfig{}
 	for _, o := range opt {
-		o(&handlerConfig{})
+		o(&conf)
 	}
+	fmt.Println("------------_", conf)
 	if (conf.username != "") && (conf.password != "") {
 		return withBasicAuth(promhttp.Handler(), conf.username, conf.password)
 	}
