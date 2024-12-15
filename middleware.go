@@ -3,7 +3,6 @@ package ginprom
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/http"
 	"strconv"
 	"time"
@@ -55,31 +54,6 @@ func init() {
 		[]string{"status_code", "method", "path"},
 	)
 	prometheus.MustRegister(duration)
-}
-
-// GetMetricHandler returns an HTTP handler for exposing Prometheus metrics collected by the prometheus/promhttp package.
-func GetMetricHandler() http.Handler {
-	return promhttp.Handler()
-}
-
-func GetMetricHandlerWithBasicAuth(username, password string) http.Handler {
-	return withBasicAuth(promhttp.Handler(), username, password)
-}
-
-func withBasicAuth(handler http.Handler, username, password string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract credentials using http.BasicAuth
-		reqUsername, reqPassword, ok := r.BasicAuth()
-		if !ok || reqUsername != username || reqPassword != password {
-			// Respond with a 401 Unauthorized if authentication fails
-			w.Header().Set("WWW-Authenticate", `Basic realm="restricted"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// If authentication is successful, call the original handler
-		handler.ServeHTTP(w, r)
-	})
 }
 
 // Middleware returns a Gin middleware handler function for collecting and exporting Prometheus metrics.
