@@ -11,7 +11,10 @@ func main() {
 
 	r.Use(ginprom.Middleware())
 
-	r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandler()))
+	//without password:
+	//r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandler()))
+
+	r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandlerWithBasicAuth("test", "test")))
 
 	r.GET("/", func(c *gin.Context) {
 		c.String(200, "Hello World")
