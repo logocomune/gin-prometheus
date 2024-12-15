@@ -71,6 +71,22 @@ func WithAggregateStatusCode(aggregate bool) Option {
 	}
 }
 
+// WithFilterRoutes creates an Option to configure a filter that allows tracking only specified routes in the service.
+func WithFilterRoutes(routes []string) Option {
+	return func(c *config) {
+		routeToFilter := make(map[string]struct{})
+		for _, r := range routes {
+			routeToFilter[r] = struct{}{}
+		}
+		c.filterPath = func(route string, path string) bool {
+			if _, ok := routeToFilter[route]; ok {
+				return true
+			}
+			return false
+		}
+	}
+}
+
 // defaultConf initializes a default configuration instance for monitoring with pre-defined default settings.
 func defaultConf(options ...Option) *config {
 	return &config{
