@@ -88,7 +88,7 @@ func WithFilterRoutes(routes []string) Option {
 }
 
 // defaultConf initializes a default configuration instance for monitoring with pre-defined default settings.
-func defaultConf(options ...Option) *config {
+func defaultConf(_ ...Option) *config {
 	return &config{
 		recordRequests:     true,
 		recordRequestSize:  true,

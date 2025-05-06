@@ -2,9 +2,10 @@ package ginprom
 
 import (
 	"bytes"
-	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 // calculateRequestSize computes the total size of an HTTP request, including method, URL, headers, and body content.

@@ -1,8 +1,9 @@
 package ginprom
 
 import (
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type handlerConfig struct {
@@ -30,11 +31,6 @@ func GetMetricHandler(opt ...HandlerOption) http.Handler {
 		return withBasicAuth(promhttp.Handler(), conf.username, conf.password)
 	}
 	return promhttp.Handler()
-}
-
-// getMetricHandlerWithBasicAuth returns an HTTP handler for Prometheus metrics with Basic Authentication enabled.
-func getMetricHandlerWithBasicAuth(username, password string) http.Handler {
-	return withBasicAuth(promhttp.Handler(), username, password)
 }
 
 func withBasicAuth(handler http.Handler, username, password string) http.Handler {
