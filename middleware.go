@@ -45,6 +45,14 @@ var (
 	DefaultSizeBuckets     = prometheus.ExponentialBuckets(100, 2, 10)
 )
 
+var statusAddr = [1000]string{}
+
+func init() {
+	for i := 0; i < 1000; i++ {
+		statusAddr[i] = strconv.Itoa(i)
+	}
+}
+
 // defaultMetricsCollection creates and returns a new MetricsCollection with default settings
 func defaultMetricsCollection() *MetricsCollection {
 	mc := &MetricsCollection{
@@ -329,23 +337,32 @@ func getPathWithFallback(c *gin.Context) string {
 
 // handleUnmatchedPath processes paths for routes that weren't matched by Gin router
 func handleUnmatchedPath(conf *config, routePattern, path string) (string, string) {
-	// If the route pattern is empty (not matched), and handling of unmatched routes is enabled
-	if routePattern == "" && conf.handleUnmatchedRoutes {
-		// If we should use a placeholder for all unmatched routes (to prevent cardinality explosion)
-		if conf.groupUnmatchedRoutes {
-			routePattern = "/unmatched/*"
-		} else {
-			// Otherwise, mark it as unmatched but keep the original path
-			routePattern = "/unmatched" + path
-		}
+	if routePattern != "" {
+		return routePattern, path
 	}
 
-	return routePattern, path
+	if conf.handleUnmatchedRoutes {
+		if conf.groupUnmatchedRoutes {
+			return "/unmatched/*", path
+		}
+		return "/unmatched" + path, path
+	}
+
+	return "", path
 }
 
 // Replace the existing getPathFromContext with our improved implementation
 func getPathFromContext(c *gin.Context) string {
-	return getPathWithFallback(c)
+	path := c.FullPath()
+	if path == "" {
+		if c.Request != nil && c.Request.URL != nil {
+			path = c.Request.URL.Path
+		}
+		if path == "" {
+			path = "/unknown"
+		}
+	}
+	return path
 }
 
 // Middleware returns a Gin handler that records Prometheus metrics for every
@@ -373,7 +390,15 @@ func MiddlewareWithMetrics(metrics *MetricsCollection, options ...Option) gin.Ha
 		start := time.Now()
 
 		route := c.FullPath()
-		path := getPathFromContext(c)
+		path := route
+		if path == "" {
+			if c.Request != nil && c.Request.URL != nil {
+				path = c.Request.URL.Path
+			}
+			if path == "" {
+				path = "/unknown"
+			}
+		}
 
 		// Process unmatched routes according to configuration
 		route, path = handleUnmatchedPath(conf, route, path)
@@ -383,52 +408,49 @@ func MiddlewareWithMetrics(metrics *MetricsCollection, options ...Option) gin.Ha
 			return
 		}
 
-		defer func() {
-			handleMetricsWithCollection(c, conf, route, path, start, metrics)
-		}()
-
 		c.Next()
+
+		handleMetricsWithCollection(c, conf, route, path, start, metrics)
 	}
 }
 
 // Handles metrics collection after request execution with custom metrics collection
 func handleMetricsWithCollection(c *gin.Context, conf *config, route, path string, start time.Time, metrics *MetricsCollection) {
-	statusCode := strconv.Itoa(c.Writer.Status())
+	status := c.Writer.Status()
+	var statusCode string
 	if conf.aggregateStatusCode {
-		statusCode = strconv.Itoa(c.Writer.Status()/100) + "xx"
+		statusCode = statusAddr[status/100] + "xx"
+	} else if status < 1000 {
+		statusCode = statusAddr[status]
+	} else {
+		statusCode = strconv.Itoa(status)
 	}
 
-	aggregatePath := conf.pathAggregator(route, path, c.Writer.Status())
-	params := []string{
-		statusCode,
-		c.Request.Method,
-		aggregatePath,
-	}
+	aggregatePath := conf.pathAggregator(route, path, status)
+	method := c.Request.Method
 
 	// Collect metrics based on configuration with custom metrics collection
-	recordRequestMetricsWithCollection(conf, c, params, start, metrics)
+	recordRequestMetricsWithCollection(conf, c, statusCode, method, aggregatePath, start, metrics)
 }
 
 // Records request-related metrics with custom metrics collection
-func recordRequestMetricsWithCollection(conf *config, c *gin.Context, params []string, start time.Time, metrics *MetricsCollection) {
+func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode, method, path string, start time.Time, metrics *MetricsCollection) {
 	// Increment total requests
-	metrics.TotalRequests.WithLabelValues(params...).Inc()
+	metrics.TotalRequests.WithLabelValues(statusCode, method, path).Inc()
 
 	// Record response size
 	if conf.recordResponseSize {
-		metrics.ResponseSize.WithLabelValues(params...).Observe(float64(computeResponseSize(c)))
+		metrics.ResponseSize.WithLabelValues(statusCode, method, path).Observe(float64(c.Writer.Size()))
 	}
 
 	// Record request size
 	if conf.recordRequestSize {
-		size := getRequestSize(c.Request)
-		metrics.RequestSize.WithLabelValues(params...).Observe(float64(size))
+		metrics.RequestSize.WithLabelValues(statusCode, method, path).Observe(float64(getRequestSize(c.Request)))
 	}
 
 	// Record duration
 	if conf.recordDuration {
-		elapsedTimeInSeconds := time.Since(start).Seconds()
-		metrics.Duration.WithLabelValues(params...).Observe(elapsedTimeInSeconds)
+		metrics.Duration.WithLabelValues(statusCode, method, path).Observe(time.Since(start).Seconds())
 	}
 }
 
@@ -438,7 +460,10 @@ func handleMetrics(c *gin.Context, conf *config, route, path string, start time.
 }
 
 func recordRequestMetrics(conf *config, c *gin.Context, params []string, start time.Time) {
-	recordRequestMetricsWithCollection(conf, c, params, start, defaultMetrics)
+	if len(params) < 3 {
+		return
+	}
+	recordRequestMetricsWithCollection(conf, c, params[0], params[1], params[2], start, defaultMetrics)
 }
 
 var (

@@ -2,9 +2,10 @@ package ginprom
 
 import (
 	"bytes"
-	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
 // calculateRequestSize computes the total size of an HTTP request efficiently.
@@ -13,38 +14,29 @@ import (
 func calculateRequestSize(r *http.Request) (int64, error) {
 	var size int64
 
-	// Add the request line size
-	size += int64(len(r.Method)) + 1       // Method and space
-	size += int64(len(r.URL.String())) + 1 // URL/path and space
-	size += int64(len(r.Proto)) + 2        // HTTP version and \r\n
+	// Add the request line size: method + " " + URL + " " + proto + "\r\n"
+	size += int64(len(r.Method) + 1 + len(r.URL.String()) + 1 + len(r.Proto) + 2)
 
 	// Calculate the size of headers
 	for name, values := range r.Header {
-		size += int64(len(name)) + 2 // Header name and ": "
+		size += int64(len(name) + 2) // Header name and ": "
 		for _, value := range values {
-			size += int64(len(value)) + 2 // Header value and \r\n
+			size += int64(len(value) + 2) // Header value and "\r\n"
 		}
 	}
 	size += 2 // Extra \r\n after headers
 
 	// For the body size, prefer using Content-Length when available
 	if r.ContentLength > 0 {
-		// If Content-Length is set and positive, use it directly
 		size += r.ContentLength
-	} else if r.ContentLength == 0 {
-		// If Content-Length is explicitly 0, there's no body
-		// No additional size to add
-	} else {
+	} else if r.ContentLength < 0 && r.Body != nil {
 		// Only read the body if Content-Length is not available (-1)
 		// and the request has a body
-		if r.Body != nil {
-			// Use a streaming approach with a counter
-			bodySize, err := calculateBodySizeStream(r)
-			if err != nil {
-				return 0, err
-			}
-			size += bodySize
+		bodySize, err := calculateBodySizeStream(r)
+		if err != nil {
+			return 0, err
 		}
+		size += bodySize
 	}
 
 	return size, nil
@@ -92,12 +84,6 @@ func readRequestBody(r *http.Request) ([]byte, error) {
 	bodyBytes, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, err
-	}
-
-	// Check if we might have truncated the body
-	if len(bodyBytes) >= maxBodySize {
-		// Consider logging a warning here that body was truncated
-		// You could also make this behavior configurable
 	}
 
 	// Create a new reader with the data we read
