@@ -5,14 +5,26 @@ import (
 	"net/http"
 )
 
+// handlerConfig holds optional credentials for Basic Authentication on the
+// metrics endpoint.
 type handlerConfig struct {
 	username string
 	password string
 }
 
-// Option defines a function type used to modify the configuration of a service during initialization.
+// HandlerOption is a functional option that configures the metrics HTTP
+// handler returned by [GetMetricHandler].
 type HandlerOption func(*handlerConfig)
 
+// WithBasicAuth protects the metrics endpoint with HTTP Basic Authentication.
+// Requests that do not supply matching credentials receive a 401 Unauthorized
+// response with a WWW-Authenticate challenge header.
+//
+// Example:
+//
+//	r.GET("/metrics", gin.WrapH(ginprom.GetMetricHandler(
+//	    ginprom.WithBasicAuth("prometheus", "s3cr3t"),
+//	)))
 func WithBasicAuth(username, password string) HandlerOption {
 	return func(c *handlerConfig) {
 		c.username = username
@@ -20,7 +32,9 @@ func WithBasicAuth(username, password string) HandlerOption {
 	}
 }
 
-// GetMetricHandler returns an HTTP handler for exposing Prometheus metrics collected by the prometheus/promhttp package.
+// GetMetricHandler returns an [http.Handler] that serves the default
+// Prometheus metrics page (equivalent to promhttp.Handler).  Pass
+// [WithBasicAuth] to require authentication before metrics are exposed.
 func GetMetricHandler(opt ...HandlerOption) http.Handler {
 	conf := handlerConfig{}
 	for _, o := range opt {
@@ -30,11 +44,6 @@ func GetMetricHandler(opt ...HandlerOption) http.Handler {
 		return withBasicAuth(promhttp.Handler(), conf.username, conf.password)
 	}
 	return promhttp.Handler()
-}
-
-// getMetricHandlerWithBasicAuth returns an HTTP handler for Prometheus metrics with Basic Authentication enabled.
-func getMetricHandlerWithBasicAuth(username, password string) http.Handler {
-	return withBasicAuth(promhttp.Handler(), username, password)
 }
 
 func withBasicAuth(handler http.Handler, username, password string) http.Handler {
