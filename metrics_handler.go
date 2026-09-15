@@ -1,6 +1,8 @@
 package ginprom
 
 import (
+	"crypto/subtle"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/http"
 )
@@ -50,7 +52,16 @@ func withBasicAuth(handler http.Handler, username, password string) http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract credentials using http.BasicAuth
 		reqUsername, reqPassword, ok := r.BasicAuth()
-		if !ok || reqUsername != username || reqPassword != password {
+
+		// Compare in constant time so response timing can't be used to guess
+		// credentials byte-by-byte. subtle.ConstantTimeCompare requires equal
+		// length inputs to stay constant-time, so mismatched lengths are
+		// treated as a mismatch up front without leaking length info via a
+		// short-circuited == check.
+		usernameMatch := subtle.ConstantTimeCompare([]byte(reqUsername), []byte(username)) == 1
+		passwordMatch := subtle.ConstantTimeCompare([]byte(reqPassword), []byte(password)) == 1
+
+		if !ok || !usernameMatch || !passwordMatch {
 			// Respond with a 401 Unauthorized if authentication fails
 			w.Header().Set("WWW-Authenticate", `Basic realm="restricted"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

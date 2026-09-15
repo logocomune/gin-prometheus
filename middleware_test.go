@@ -3,6 +3,7 @@ package ginprom
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -180,6 +181,44 @@ func TestMiddlewareWithMetrics_NoSizeNoDuration(t *testing.T) {
 	}
 }
 
+// TestMiddlewareWithMetrics_RequestSize_UnknownContentLength is an
+// end-to-end regression test for the countingReadCloser wiring: it sends a
+// request with an unknown Content-Length (as chunked transfer-encoding
+// would produce) and asserts that the handler still receives the complete,
+// byte-for-byte original body. Before this fix, request-size measurement
+// happened *after* the handler ran and could either see an
+// already-consumed body or require buffering it without limit; this test
+// guards against a regression back to either behaviour.
+func TestMiddlewareWithMetrics_RequestSize_UnknownContentLength(t *testing.T) {
+	mc := newTestMetrics()
+	r := gin.New()
+	r.Use(MiddlewareWithMetrics(mc))
+
+	var bodyLen int
+	r.POST("/upload", func(c *gin.Context) {
+		data, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Fatalf("handler failed to read body: %v", err)
+		}
+		bodyLen = len(data)
+		c.Status(http.StatusOK)
+	})
+
+	const payload = "this body arrives with an unknown Content-Length, e.g. chunked transfer-encoding"
+	req := httptest.NewRequest(http.MethodPost, "/upload", strings.NewReader(payload))
+	req.ContentLength = -1 // force the "unknown length" path this test targets
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if bodyLen != len(payload) {
+		t.Fatalf("handler saw %d bytes, expected %d — body was altered by the middleware wrapper", bodyLen, len(payload))
+	}
+}
+
 func TestMiddlewareWithMetrics_UnmatchedRoute(t *testing.T) {
 	mc := newTestMetrics()
 	r := gin.New()
@@ -309,6 +348,39 @@ func TestNewMetricsCollection_WithCustomHistograms(t *testing.T) {
 	}
 }
 
+// TestNewMetricsCollection_DuplicateRegistration_NoPanic guards the fix for
+// the auto-registration panic risk: registering a second MetricsCollection
+// with default names against a registry that already has one must reuse the
+// existing collectors instead of panicking via MustRegister's old behaviour.
+func TestNewMetricsCollection_DuplicateRegistration_NoPanic(t *testing.T) {
+	reg := newTestRegistry()
+
+	first := NewMetricsCollection(WithCustomRegistry(reg))
+
+	var second *MetricsCollection
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("second NewMetricsCollection panicked on name collision: %v", r)
+			}
+		}()
+		second = NewMetricsCollection(WithCustomRegistry(reg))
+	}()
+
+	if first.TotalRequests != second.TotalRequests {
+		t.Error("expected the second collection to reuse the already-registered TotalRequests counter")
+	}
+	if first.ResponseSize != second.ResponseSize {
+		t.Error("expected the second collection to reuse the already-registered ResponseSize histogram")
+	}
+	if first.RequestSize != second.RequestSize {
+		t.Error("expected the second collection to reuse the already-registered RequestSize histogram")
+	}
+	if first.Duration != second.Duration {
+		t.Error("expected the second collection to reuse the already-registered Duration histogram")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WithUnmatchedRouteMarking / WithUnmatchedRouteGrouping options
 // ---------------------------------------------------------------------------
@@ -334,7 +406,7 @@ func TestWithUnmatchedRouteGrouping(t *testing.T) {
 func TestGetRequestSize_KnownContentLength(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", strings.NewReader("hello"))
 	req.ContentLength = 5
-	size := getRequestSize(req)
+	size := getRequestSize(req, nil)
 	if size != 5 {
 		t.Errorf("expected 5, got %d", size)
 	}
@@ -343,18 +415,42 @@ func TestGetRequestSize_KnownContentLength(t *testing.T) {
 func TestGetRequestSize_ZeroContentLength(t *testing.T) {
 	req, _ := http.NewRequest("GET", "/", nil)
 	req.ContentLength = 0
-	size := getRequestSize(req)
+	size := getRequestSize(req, nil)
 	if size != 0 {
 		t.Errorf("expected 0, got %d", size)
 	}
 }
 
-func TestGetRequestSize_UnknownContentLength(t *testing.T) {
+// Without a counter installed (e.g. request-size recording is disabled, or
+// there was no body to wrap), an unknown Content-Length must fall back to 0
+// rather than draining the body to find out its size.
+func TestGetRequestSize_UnknownContentLengthNoCounter(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", strings.NewReader("body data"))
 	req.ContentLength = -1
-	size := getRequestSize(req)
-	if size <= 0 {
-		t.Errorf("expected positive size, got %d", size)
+	size := getRequestSize(req, nil)
+	if size != 0 {
+		t.Errorf("expected 0 without a counter, got %d", size)
+	}
+}
+
+// With a countingReadCloser installed before the handler runs (mirroring
+// what MiddlewareWithMetrics does), getRequestSize must report exactly how
+// many bytes were read through it.
+func TestGetRequestSize_UnknownContentLengthWithCounter(t *testing.T) {
+	const body = "body data"
+	req, _ := http.NewRequest("POST", "/", strings.NewReader(body))
+	req.ContentLength = -1
+
+	counter := &countingReadCloser{ReadCloser: req.Body}
+	req.Body = counter
+
+	if _, err := io.ReadAll(req.Body); err != nil {
+		t.Fatalf("unexpected error reading body: %v", err)
+	}
+
+	size := getRequestSize(req, counter)
+	if size != int64(len(body)) {
+		t.Errorf("expected %d, got %d", len(body), size)
 	}
 }
 

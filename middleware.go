@@ -53,6 +53,40 @@ func init() {
 	}
 }
 
+// registerCounterOrReuse registers c with registry. If a collector with the
+// same fully-qualified name is already registered (prometheus.
+// AlreadyRegisteredError), the pre-existing *prometheus.CounterVec is
+// returned instead of panicking, so that importing this package twice in
+// the same process (e.g. via two different modules that both depend on it)
+// or re-registering against the global default registry does not crash the
+// program at startup. Any other registration error still panics, matching
+// the previous MustRegister behaviour.
+func registerCounterOrReuse(registry prometheus.Registerer, c *prometheus.CounterVec) *prometheus.CounterVec {
+	if err := registry.Register(c); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if existing, ok := are.ExistingCollector.(*prometheus.CounterVec); ok {
+				return existing
+			}
+		}
+		panic(err)
+	}
+	return c
+}
+
+// registerHistogramOrReuse is the histogram equivalent of
+// registerCounterOrReuse; see its doc comment for rationale.
+func registerHistogramOrReuse(registry prometheus.Registerer, h *prometheus.HistogramVec) *prometheus.HistogramVec {
+	if err := registry.Register(h); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if existing, ok := are.ExistingCollector.(*prometheus.HistogramVec); ok {
+				return existing
+			}
+		}
+		panic(err)
+	}
+	return h
+}
+
 // defaultMetricsCollection creates and returns a new MetricsCollection with default settings
 func defaultMetricsCollection() *MetricsCollection {
 	mc := &MetricsCollection{
@@ -89,11 +123,13 @@ func defaultMetricsCollection() *MetricsCollection {
 		),
 	}
 
-	// Use default prometheus registry
-	prometheus.MustRegister(mc.TotalRequests)
-	prometheus.MustRegister(mc.ResponseSize)
-	prometheus.MustRegister(mc.RequestSize)
-	prometheus.MustRegister(mc.Duration)
+	// Register with the default registry, reusing pre-existing collectors on
+	// a name collision instead of panicking (see registerCounterOrReuse).
+	registry := prometheus.DefaultRegisterer
+	mc.TotalRequests = registerCounterOrReuse(registry, mc.TotalRequests)
+	mc.ResponseSize = registerHistogramOrReuse(registry, mc.ResponseSize)
+	mc.RequestSize = registerHistogramOrReuse(registry, mc.RequestSize)
+	mc.Duration = registerHistogramOrReuse(registry, mc.Duration)
 
 	return mc
 }
@@ -163,16 +199,20 @@ func NewMetricsCollection(opts ...MetricsOption) *MetricsCollection {
 		)
 	}
 
-	// Register with the appropriate registry
+	// Register with the appropriate registry, reusing pre-existing
+	// collectors on a name collision instead of panicking (see
+	// registerCounterOrReuse). This matters most for the default global
+	// registry, which any number of independent packages in the same
+	// process may also register against.
 	registry := prometheus.DefaultRegisterer
 	if mc.Registry != nil {
 		registry = mc.Registry
 	}
 
-	registry.MustRegister(mc.TotalRequests)
-	registry.MustRegister(mc.ResponseSize)
-	registry.MustRegister(mc.RequestSize)
-	registry.MustRegister(mc.Duration)
+	mc.TotalRequests = registerCounterOrReuse(registry, mc.TotalRequests)
+	mc.ResponseSize = registerHistogramOrReuse(registry, mc.ResponseSize)
+	mc.RequestSize = registerHistogramOrReuse(registry, mc.RequestSize)
+	mc.Duration = registerHistogramOrReuse(registry, mc.Duration)
 
 	return mc
 }
@@ -351,20 +391,6 @@ func handleUnmatchedPath(conf *config, routePattern, path string) (string, strin
 	return "", path
 }
 
-// Replace the existing getPathFromContext with our improved implementation
-func getPathFromContext(c *gin.Context) string {
-	path := c.FullPath()
-	if path == "" {
-		if c.Request != nil && c.Request.URL != nil {
-			path = c.Request.URL.Path
-		}
-		if path == "" {
-			path = "/unknown"
-		}
-	}
-	return path
-}
-
 // Middleware returns a Gin handler that records Prometheus metrics for every
 // request using the package-level default metric collectors registered with
 // the global Prometheus registry.
@@ -408,14 +434,29 @@ func MiddlewareWithMetrics(metrics *MetricsCollection, options ...Option) gin.Ha
 			return
 		}
 
+		// For requests with unknown Content-Length (e.g. chunked
+		// transfer-encoding), wrap the body in a counting reader *before*
+		// the handler runs so its size can be measured as it is actually
+		// read — accurately and without buffering it in memory. This must
+		// happen before c.Next(): reading (or re-reading) the body
+		// afterwards would see it already drained/closed by the handler,
+		// and measuring "whatever is left unread" via an unbounded read is
+		// itself a memory-exhaustion risk for a handler that never reads
+		// the body at all.
+		var bodyCounter *countingReadCloser
+		if conf.recordRequestSize && c.Request != nil && c.Request.Body != nil && c.Request.ContentLength < 0 {
+			bodyCounter = &countingReadCloser{ReadCloser: c.Request.Body}
+			c.Request.Body = bodyCounter
+		}
+
 		c.Next()
 
-		handleMetricsWithCollection(c, conf, route, path, start, metrics)
+		handleMetricsWithCollection(c, conf, route, path, start, metrics, bodyCounter)
 	}
 }
 
 // Handles metrics collection after request execution with custom metrics collection
-func handleMetricsWithCollection(c *gin.Context, conf *config, route, path string, start time.Time, metrics *MetricsCollection) {
+func handleMetricsWithCollection(c *gin.Context, conf *config, route, path string, start time.Time, metrics *MetricsCollection, bodyCounter *countingReadCloser) {
 	status := c.Writer.Status()
 	var statusCode string
 	if conf.aggregateStatusCode {
@@ -430,11 +471,11 @@ func handleMetricsWithCollection(c *gin.Context, conf *config, route, path strin
 	method := c.Request.Method
 
 	// Collect metrics based on configuration with custom metrics collection
-	recordRequestMetricsWithCollection(conf, c, statusCode, method, aggregatePath, start, metrics)
+	recordRequestMetricsWithCollection(conf, c, statusCode, method, aggregatePath, start, metrics, bodyCounter)
 }
 
 // Records request-related metrics with custom metrics collection
-func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode, method, path string, start time.Time, metrics *MetricsCollection) {
+func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode, method, path string, start time.Time, metrics *MetricsCollection, bodyCounter *countingReadCloser) {
 	// Increment total requests
 	metrics.TotalRequests.WithLabelValues(statusCode, method, path).Inc()
 
@@ -445,7 +486,7 @@ func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode
 
 	// Record request size
 	if conf.recordRequestSize {
-		metrics.RequestSize.WithLabelValues(statusCode, method, path).Observe(float64(getRequestSize(c.Request)))
+		metrics.RequestSize.WithLabelValues(statusCode, method, path).Observe(float64(getRequestSize(c.Request, bodyCounter)))
 	}
 
 	// Record duration
@@ -454,36 +495,19 @@ func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode
 	}
 }
 
-// Keep the old functions for backward compatibility
-func handleMetrics(c *gin.Context, conf *config, route, path string, start time.Time) {
-	handleMetricsWithCollection(c, conf, route, path, start, defaultMetrics)
-}
-
-func recordRequestMetrics(conf *config, c *gin.Context, params []string, start time.Time) {
-	if len(params) < 3 {
-		return
-	}
-	recordRequestMetricsWithCollection(conf, c, params[0], params[1], params[2], start, defaultMetrics)
-}
-
-var (
-	totalRequests *prometheus.CounterVec
-	responseSize  *prometheus.HistogramVec
-	requestSize   *prometheus.HistogramVec
-	duration      *prometheus.HistogramVec
-)
-
-// Safely retrieves request size, falling back if Content-Length is unavailable
-func getRequestSize(r *http.Request) int64 {
-	if r.ContentLength != -1 {
+// getRequestSize returns the request body size. When Content-Length is known
+// (>= 0) it is used directly. When it is unknown (-1, e.g. chunked
+// transfer-encoding), the size comes from bodyCounter, which was installed
+// on the request body before the handler ran and reflects exactly how many
+// bytes were actually read through it. bodyCounter is nil (and 0 is
+// returned) whenever request-size recording is disabled or the request had
+// no body — countingReadCloser.bytesRead() is nil-safe, so no extra check is
+// needed here.
+func getRequestSize(r *http.Request, bodyCounter *countingReadCloser) int64 {
+	if r.ContentLength >= 0 {
 		return r.ContentLength
 	}
-
-	size, err := calculateRequestSize(r)
-	if err != nil {
-		return 0 // Fallback to 0 if calculation fails
-	}
-	return size
+	return bodyCounter.bytesRead()
 }
 
 // WithUnmatchedRouteMarking enables or disables the special "/unmatched" prefix
