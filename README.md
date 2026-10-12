@@ -255,6 +255,14 @@ r.Use(ginprom.Middleware(
 ))
 ```
 
+### Complete example service
+
+[`examples/mac-vendor-service`](examples/mac-vendor-service) is a runnable
+service that resolves MAC addresses to vendors via
+[maclookup-go](https://github.com/logocomune/maclookup-go). It combines this
+middleware with its own business metrics (upstream calls, cache hits, API
+quota), Basic Auth on `/metrics` and graceful shutdown.
+
 ---
 
 ## Prometheus Scrape Configuration
