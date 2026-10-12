@@ -2,259 +2,107 @@ package ginprom
 
 import (
 	"bytes"
+	"errors"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
 
 // ---------------------------------------------------------------------------
-// calculateRequestSize
+// countingReadCloser
 // ---------------------------------------------------------------------------
 
-func TestCalculateRequestSize_NoUserInfo(t *testing.T) {
-	req, err := http.NewRequest("GET", "/test", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-
-	expected := int64(len(req.Method)) + 1 + int64(len(req.URL.String())) + 1 + int64(len(req.Proto)) + 2 + 2
-	if size != expected {
-		t.Errorf("expected %d, got %d", expected, size)
+func TestCountingReadCloser_NilReceiver_BytesRead(t *testing.T) {
+	var c *countingReadCloser
+	if got := c.bytesRead(); got != 0 {
+		t.Errorf("expected 0 for nil *countingReadCloser, got %d", got)
 	}
 }
 
-func TestCalculateRequestSize_WithUserInfo(t *testing.T) {
-	req, err := http.NewRequest("GET", "http://user:pass@example.com/test", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-
-	expected := int64(len(req.Method)) + 1 + int64(len(req.URL.String())) + 1 + int64(len(req.Proto)) + 2 + 2
-	if size != expected {
-		t.Errorf("expected %d, got %d", expected, size)
+func TestCountingReadCloser_ZeroBeforeRead(t *testing.T) {
+	c := &countingReadCloser{ReadCloser: io.NopCloser(strings.NewReader("hello"))}
+	if got := c.bytesRead(); got != 0 {
+		t.Errorf("expected 0 before any Read, got %d", got)
 	}
 }
 
-func TestCalculateRequestSize_WithHeaders(t *testing.T) {
-	req, err := http.NewRequest("GET", "/test", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Custom-Header", "value")
+func TestCountingReadCloser_CountsFullRead(t *testing.T) {
+	const data = "streaming body content"
+	c := &countingReadCloser{ReadCloser: io.NopCloser(strings.NewReader(data))}
 
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-	if size <= 0 {
-		t.Errorf("expected positive size, got %d", size)
-	}
-}
-
-func TestCalculateRequestSize_WithPositiveContentLength(t *testing.T) {
-	body := strings.NewReader("hello world")
-	req, err := http.NewRequest("POST", "/test", body)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.ContentLength = 11
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-	// Size must include at least the body length
-	if size < 11 {
-		t.Errorf("expected size >= 11, got %d", size)
-	}
-}
-
-func TestCalculateRequestSize_WithZeroContentLength(t *testing.T) {
-	req, err := http.NewRequest("POST", "/test", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.ContentLength = 0
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-	if size < 0 {
-		t.Errorf("expected non-negative size, got %d", size)
-	}
-}
-
-func TestCalculateRequestSize_WithUnknownContentLengthAndBody(t *testing.T) {
-	bodyData := "streaming body content"
-	body := io.NopCloser(strings.NewReader(bodyData))
-	req, err := http.NewRequest("POST", "/test", body)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.ContentLength = -1
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-	if size < int64(len(bodyData)) {
-		t.Errorf("expected size >= %d, got %d", len(bodyData), size)
-	}
-}
-
-func TestCalculateRequestSize_WithNilBody(t *testing.T) {
-	req, err := http.NewRequest("GET", "/test", nil)
-	if err != nil {
-		t.Fatalf("failed to create request: %v", err)
-	}
-	req.ContentLength = -1
-	req.Body = nil
-
-	size, err := calculateRequestSize(req)
-	if err != nil {
-		t.Fatalf("calculateRequestSize returned error: %v", err)
-	}
-	if size < 0 {
-		t.Errorf("expected non-negative size, got %d", size)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// calculateBodySizeStream
-// ---------------------------------------------------------------------------
-
-func TestCalculateBodySizeStream_NilBody(t *testing.T) {
-	req, _ := http.NewRequest("GET", "/", nil)
-	req.Body = nil
-	size, err := calculateBodySizeStream(req)
+	got, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if size != 0 {
+	if string(got) != data {
+		t.Errorf("expected body %q to pass through unchanged, got %q", data, string(got))
+	}
+	if size := c.bytesRead(); size != int64(len(data)) {
+		t.Errorf("expected bytesRead() == %d, got %d", len(data), size)
+	}
+}
+
+func TestCountingReadCloser_EmptyBody(t *testing.T) {
+	c := &countingReadCloser{ReadCloser: io.NopCloser(bytes.NewReader(nil))}
+
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if size := c.bytesRead(); size != 0 {
 		t.Errorf("expected 0, got %d", size)
 	}
 }
 
-func TestCalculateBodySizeStream_WithBody(t *testing.T) {
-	data := "test body"
-	req, _ := http.NewRequest("POST", "/", strings.NewReader(data))
+// CountsPartialRead verifies that bytes are counted as they are consumed —
+// i.e. the size reflects what the handler actually read, not the full body,
+// when the handler stops reading early (e.g. it only needs a header and
+// ignores the rest of the payload).
+func TestCountingReadCloser_CountsPartialRead(t *testing.T) {
+	const data = "0123456789"
+	c := &countingReadCloser{ReadCloser: io.NopCloser(strings.NewReader(data))}
 
-	size, err := calculateBodySizeStream(req)
+	buf := make([]byte, 4)
+	n, err := c.Read(buf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if size != int64(len(data)) {
-		t.Errorf("expected %d, got %d", len(data), size)
+	if n != 4 {
+		t.Fatalf("expected to read 4 bytes, got %d", n)
 	}
-
-	// Body should be restored and readable
-	restored, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatalf("failed to read restored body: %v", err)
-	}
-	if string(restored) != data {
-		t.Errorf("body not restored correctly: got %q", string(restored))
+	if size := c.bytesRead(); size != 4 {
+		t.Errorf("expected bytesRead() == 4 after partial read, got %d", size)
 	}
 }
 
-func TestCalculateBodySizeStream_EmptyBody(t *testing.T) {
-	req, _ := http.NewRequest("POST", "/", bytes.NewReader([]byte{}))
-
-	size, err := calculateBodySizeStream(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if size != 0 {
-		t.Errorf("expected 0, got %d", size)
-	}
+// erroringReader returns some data together with a non-nil error on its
+// final call, mirroring real-world readers (e.g. a dropped connection
+// mid-body). countingReadCloser must still count the bytes it did deliver.
+type erroringReader struct {
+	data []byte
+	sent bool
 }
 
-// ---------------------------------------------------------------------------
-// readRequestBody
-// ---------------------------------------------------------------------------
-
-func TestReadRequestBody_NilBody(t *testing.T) {
-	req, _ := http.NewRequest("GET", "/", nil)
-	data, err := readRequestBody(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func (r *erroringReader) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
 	}
-	if data != nil {
-		t.Errorf("expected nil, got %v", data)
-	}
+	r.sent = true
+	n := copy(p, r.data)
+	return n, errors.New("connection reset")
 }
 
-func TestReadRequestBody_WithBody(t *testing.T) {
-	payload := "request body content"
-	req, _ := http.NewRequest("POST", "/", strings.NewReader(payload))
+func TestCountingReadCloser_CountsBytesOnErroredRead(t *testing.T) {
+	c := &countingReadCloser{ReadCloser: io.NopCloser(&erroringReader{data: []byte("partial")})}
 
-	data, err := readRequestBody(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	buf := make([]byte, 32)
+	n, err := c.Read(buf)
+	if err == nil {
+		t.Fatal("expected an error from the underlying reader")
 	}
-	if string(data) != payload {
-		t.Errorf("expected %q, got %q", payload, string(data))
+	if n != len("partial") {
+		t.Fatalf("expected %d bytes, got %d", len("partial"), n)
 	}
-
-	// Body must still be readable after readRequestBody
-	restored, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatalf("failed to read restored body: %v", err)
-	}
-	if string(restored) != payload {
-		t.Errorf("body not properly restored: got %q", string(restored))
-	}
-}
-
-func TestReadRequestBody_EmptyBody(t *testing.T) {
-	req, _ := http.NewRequest("POST", "/", bytes.NewReader([]byte{}))
-
-	data, err := readRequestBody(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(data) != 0 {
-		t.Errorf("expected empty slice, got %v", data)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// computeResponseSize
-// ---------------------------------------------------------------------------
-
-func TestComputeResponseSize_NilWriter(t *testing.T) {
-	c := &gin.Context{}
-	size := computeResponseSize(c)
-	if size != 0 {
-		t.Errorf("expected 0 for nil writer, got %d", size)
-	}
-}
-
-func TestComputeResponseSize_WithResponse(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-
-	c.String(http.StatusOK, "hello world")
-
-	size := computeResponseSize(c)
-	if size <= 0 {
-		t.Errorf("expected positive size, got %d", size)
+	if size := c.bytesRead(); size != int64(len("partial")) {
+		t.Errorf("expected bytesRead() == %d even though Read errored, got %d", len("partial"), size)
 	}
 }

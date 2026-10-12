@@ -1,8 +1,11 @@
 package ginprom
 
 import (
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // handlerConfig holds optional credentials for Basic Authentication on the
@@ -47,10 +50,26 @@ func GetMetricHandler(opt ...HandlerOption) http.Handler {
 }
 
 func withBasicAuth(handler http.Handler, username, password string) http.Handler {
+	// Hash the expected credentials once. Comparing fixed-length SHA-256
+	// digests keeps the check constant-time even when lengths differ:
+	// subtle.ConstantTimeCompare returns early on a length mismatch, which
+	// would otherwise reveal the length of the configured credentials.
+	wantUsername := sha256.Sum256([]byte(username))
+	wantPassword := sha256.Sum256([]byte(password))
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Extract credentials using http.BasicAuth
 		reqUsername, reqPassword, ok := r.BasicAuth()
-		if !ok || reqUsername != username || reqPassword != password {
+
+		gotUsername := sha256.Sum256([]byte(reqUsername))
+		gotPassword := sha256.Sum256([]byte(reqPassword))
+
+		// Evaluate both comparisons unconditionally so timing does not reveal
+		// which of the two was wrong.
+		usernameMatch := subtle.ConstantTimeCompare(gotUsername[:], wantUsername[:])
+		passwordMatch := subtle.ConstantTimeCompare(gotPassword[:], wantPassword[:])
+
+		if !ok || usernameMatch&passwordMatch != 1 {
 			// Respond with a 401 Unauthorized if authentication fails
 			w.Header().Set("WWW-Authenticate", `Basic realm="restricted"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

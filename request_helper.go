@@ -1,112 +1,44 @@
 package ginprom
 
 import (
-	"bytes"
 	"io"
-	"net/http"
-
-	"github.com/gin-gonic/gin"
 )
 
-// calculateRequestSize computes the total size of an HTTP request efficiently.
-// It avoids reading the entire request body when possible by using Content-Length.
-// Returns the calculated size in bytes and an error if the request cannot be processed.
-func calculateRequestSize(r *http.Request) (int64, error) {
-	var size int64
-
-	// Add the request line size: method + " " + URL + " " + proto + "\r\n"
-	size += int64(len(r.Method) + 1 + len(r.URL.String()) + 1 + len(r.Proto) + 2)
-
-	// Calculate the size of headers
-	for name, values := range r.Header {
-		size += int64(len(name) + 2) // Header name and ": "
-		for _, value := range values {
-			size += int64(len(value) + 2) // Header value and "\r\n"
-		}
-	}
-	size += 2 // Extra \r\n after headers
-
-	// For the body size, prefer using Content-Length when available
-	if r.ContentLength > 0 {
-		size += r.ContentLength
-	} else if r.ContentLength < 0 && r.Body != nil {
-		// Only read the body if Content-Length is not available (-1)
-		// and the request has a body
-		bodySize, err := calculateBodySizeStream(r)
-		if err != nil {
-			return 0, err
-		}
-		size += bodySize
-	}
-
-	return size, nil
+// countingReadCloser wraps an *http.Request's Body and counts the number of
+// bytes read through it as the downstream handler consumes them.
+//
+// It exists to measure request body size for requests with unknown
+// Content-Length (e.g. chunked transfer-encoding) without buffering the
+// body in memory and without altering what the handler receives — the same
+// principle Gin's own ResponseWriter already uses to count response bytes
+// (see c.Writer.Size()).
+//
+// It must be installed on c.Request.Body *before* the handler runs (i.e.
+// before c.Next()); reading it afterwards would either see an
+// already-drained, already-closed body, or — for a body the handler never
+// touched — require an unbounded read to find out how large it was, which
+// is exactly the memory-exhaustion issue this type replaces.
+type countingReadCloser struct {
+	io.ReadCloser
+	n int64
 }
 
-// calculateBodySizeStream calculates the size of the request body using a streaming approach
-// that counts bytes without loading the entire body into memory.
-// It also restores the body for further processing.
-func calculateBodySizeStream(r *http.Request) (int64, error) {
-	if r.Body == nil {
-		return 0, nil
-	}
-
-	// Create a buffer to hold body data as we read it
-	var buf bytes.Buffer
-
-	// Count the bytes as we read them
-	bodySize, err := io.Copy(&buf, r.Body)
-	if err != nil {
-		return 0, err
-	}
-
-	// Restore the body for further use
-	r.Body = io.NopCloser(bytes.NewReader(buf.Bytes()))
-
-	return bodySize, nil
+// Read implements io.Reader, delegating to the wrapped body and counting
+// every byte that passes through, including on a non-nil error (some
+// readers return a final n > 0 together with io.EOF).
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
-// readRequestBody reads the body of an HTTP request and restores it to allow further use.
-// Returns the body as a byte slice and any error encountered during reading.
-// This implementation uses a maxBodySize limit to prevent excessive memory usage.
-func readRequestBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-
-	// Set a reasonable limit for request body size to prevent memory issues
-	// This can be made configurable if needed
-	const maxBodySize = 10 * 1024 * 1024 // 10MB limit
-
-	// Use LimitReader to prevent reading excessively large bodies into memory
-	limitedReader := io.LimitReader(r.Body, maxBodySize)
-
-	// Read the body with the size limit
-	bodyBytes, err := io.ReadAll(limitedReader)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create a new reader with the data we read
-	bodyReader := bytes.NewReader(bodyBytes)
-
-	// Store a copy of the body data for the metrics calculation
-	metricsCopy := make([]byte, len(bodyBytes))
-	copy(metricsCopy, bodyBytes)
-
-	// Reset the body reader position for subsequent readers
-	bodyReader.Seek(0, io.SeekStart)
-
-	// Replace the original body with our buffered copy
-	r.Body = io.NopCloser(bodyReader)
-
-	return metricsCopy, nil
-}
-
-// computeResponseSize calculates the size of the HTTP response written by the context's writer.
-// Returns 0 if the writer is nil.
-func computeResponseSize(c *gin.Context) int {
-	if c.Writer == nil {
+// bytesRead returns the number of bytes read through the wrapper so far.
+// Safe to call on a nil *countingReadCloser (returns 0), which keeps call
+// sites simple when wrapping was skipped (e.g. request-size recording is
+// disabled, or the request has no body).
+func (c *countingReadCloser) bytesRead() int64 {
+	if c == nil {
 		return 0
 	}
-	return c.Writer.Size()
+	return c.n
 }

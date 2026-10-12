@@ -82,7 +82,7 @@ All metrics carry three labels:
 |---|---|---|
 | `http_requests_total` | Counter | Total number of handled requests |
 | `http_request_duration_seconds` | Histogram | Time elapsed from first byte received to last byte sent |
-| `http_request_size_bytes` | Histogram | Inbound request size (headers + body) |
+| `http_request_size_bytes` | Histogram | Inbound request body size: `Content-Length` when known, otherwise the bytes the handler actually read (e.g. chunked uploads) |
 | `http_response_size_bytes` | Histogram | Outbound response body size |
 
 Default histogram buckets:
