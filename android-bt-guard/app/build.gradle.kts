@@ -16,6 +16,13 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // CI passes a persistent key, so every build installs as an update.
+            System.getenv("BTGUARD_DEBUG_KEYSTORE")?.let { storeFile = file(it) }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false

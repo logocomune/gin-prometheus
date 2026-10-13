@@ -26,17 +26,24 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # Keep the debug signing key between runs, so a new build installs as
-      # an update instead of requiring the old app to be uninstalled first.
+      # One signing key for all builds, so a new APK installs as an update
+      # instead of requiring the old app (and its log) to be removed first.
       - uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: bt-waechter-debug-keystore
+          path: ~/btguard-debug.keystore
+          key: bt-waechter-debug-keystore-v2
+
+      - name: Create signing key on first run
+        run: |
+          [ -f ~/btguard-debug.keystore ] || keytool -genkeypair -noprompt \
+            -keystore ~/btguard-debug.keystore -storepass android -keypass android \
+            -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
 
       - name: Build APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
+          BTGUARD_DEBUG_KEYSTORE="$HOME/btguard-debug.keystore" ./gradlew --no-daemon assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk bt-waechter.apk
 
       - uses: actions/upload-artifact@v4
