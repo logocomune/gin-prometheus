@@ -351,20 +351,6 @@ func handleUnmatchedPath(conf *config, routePattern, path string) (string, strin
 	return "", path
 }
 
-// Replace the existing getPathFromContext with our improved implementation
-func getPathFromContext(c *gin.Context) string {
-	path := c.FullPath()
-	if path == "" {
-		if c.Request != nil && c.Request.URL != nil {
-			path = c.Request.URL.Path
-		}
-		if path == "" {
-			path = "/unknown"
-		}
-	}
-	return path
-}
-
 // Middleware returns a Gin handler that records Prometheus metrics for every
 // request using the package-level default metric collectors registered with
 // the global Prometheus registry.
@@ -408,14 +394,20 @@ func MiddlewareWithMetrics(metrics *MetricsCollection, options ...Option) gin.Ha
 			return
 		}
 
+		var bodyCounter *countingReadCloser
+		if conf.recordRequestSize && c.Request.Body != nil && c.Request.ContentLength < 0 {
+			bodyCounter = &countingReadCloser{ReadCloser: c.Request.Body}
+			c.Request.Body = bodyCounter
+		}
+
 		c.Next()
 
-		handleMetricsWithCollection(c, conf, route, path, start, metrics)
+		handleMetricsWithCollection(c, conf, route, path, start, metrics, bodyCounter)
 	}
 }
 
 // Handles metrics collection after request execution with custom metrics collection
-func handleMetricsWithCollection(c *gin.Context, conf *config, route, path string, start time.Time, metrics *MetricsCollection) {
+func handleMetricsWithCollection(c *gin.Context, conf *config, route, path string, start time.Time, metrics *MetricsCollection, bodyCounter *countingReadCloser) {
 	status := c.Writer.Status()
 	var statusCode string
 	if conf.aggregateStatusCode {
@@ -430,11 +422,11 @@ func handleMetricsWithCollection(c *gin.Context, conf *config, route, path strin
 	method := c.Request.Method
 
 	// Collect metrics based on configuration with custom metrics collection
-	recordRequestMetricsWithCollection(conf, c, statusCode, method, aggregatePath, start, metrics)
+	recordRequestMetricsWithCollection(conf, c, statusCode, method, aggregatePath, start, metrics, bodyCounter)
 }
 
 // Records request-related metrics with custom metrics collection
-func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode, method, path string, start time.Time, metrics *MetricsCollection) {
+func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode, method, path string, start time.Time, metrics *MetricsCollection, bodyCounter *countingReadCloser) {
 	// Increment total requests
 	metrics.TotalRequests.WithLabelValues(statusCode, method, path).Inc()
 
@@ -445,7 +437,7 @@ func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode
 
 	// Record request size
 	if conf.recordRequestSize {
-		metrics.RequestSize.WithLabelValues(statusCode, method, path).Observe(float64(getRequestSize(c.Request)))
+		metrics.RequestSize.WithLabelValues(statusCode, method, path).Observe(float64(getRequestSize(c.Request, bodyCounter)))
 	}
 
 	// Record duration
@@ -454,36 +446,16 @@ func recordRequestMetricsWithCollection(conf *config, c *gin.Context, statusCode
 	}
 }
 
-// Keep the old functions for backward compatibility
-func handleMetrics(c *gin.Context, conf *config, route, path string, start time.Time) {
-	handleMetricsWithCollection(c, conf, route, path, start, defaultMetrics)
-}
-
-func recordRequestMetrics(conf *config, c *gin.Context, params []string, start time.Time) {
-	if len(params) < 3 {
-		return
-	}
-	recordRequestMetricsWithCollection(conf, c, params[0], params[1], params[2], start, defaultMetrics)
-}
-
-var (
-	totalRequests *prometheus.CounterVec
-	responseSize  *prometheus.HistogramVec
-	requestSize   *prometheus.HistogramVec
-	duration      *prometheus.HistogramVec
-)
-
-// Safely retrieves request size, falling back if Content-Length is unavailable
-func getRequestSize(r *http.Request) int64 {
-	if r.ContentLength != -1 {
+// Unknown-length bodies are measured only through handler reads; draining them
+// after the handler returns would buffer unbounded input and measure the remainder.
+func getRequestSize(r *http.Request, bodyCounter *countingReadCloser) int64 {
+	if r.ContentLength >= 0 {
 		return r.ContentLength
 	}
-
-	size, err := calculateRequestSize(r)
-	if err != nil {
-		return 0 // Fallback to 0 if calculation fails
+	if bodyCounter == nil {
+		return 0
 	}
-	return size
+	return bodyCounter.bytesRead
 }
 
 // WithUnmatchedRouteMarking enables or disables the special "/unmatched" prefix

@@ -334,7 +334,7 @@ func TestWithUnmatchedRouteGrouping(t *testing.T) {
 func TestGetRequestSize_KnownContentLength(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", strings.NewReader("hello"))
 	req.ContentLength = 5
-	size := getRequestSize(req)
+	size := getRequestSize(req, nil)
 	if size != 5 {
 		t.Errorf("expected 5, got %d", size)
 	}
@@ -343,7 +343,7 @@ func TestGetRequestSize_KnownContentLength(t *testing.T) {
 func TestGetRequestSize_ZeroContentLength(t *testing.T) {
 	req, _ := http.NewRequest("GET", "/", nil)
 	req.ContentLength = 0
-	size := getRequestSize(req)
+	size := getRequestSize(req, nil)
 	if size != 0 {
 		t.Errorf("expected 0, got %d", size)
 	}
@@ -352,9 +352,9 @@ func TestGetRequestSize_ZeroContentLength(t *testing.T) {
 func TestGetRequestSize_UnknownContentLength(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", strings.NewReader("body data"))
 	req.ContentLength = -1
-	size := getRequestSize(req)
-	if size <= 0 {
-		t.Errorf("expected positive size, got %d", size)
+	size := getRequestSize(req, nil)
+	if size != 0 {
+		t.Errorf("expected zero without a body counter, got %d", size)
 	}
 }
 

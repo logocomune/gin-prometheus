@@ -33,7 +33,8 @@ them to [Prometheus](https://prometheus.io/).
 go get github.com/logocomune/gin-prometheus
 ```
 
-Requires Go 1.23+ and Gin v1.10+.
+Requires Go 1.26.0 or later, as declared in `go.mod`. The current module uses
+Gin v1.12.0 and Prometheus client_golang v1.25.0.
 
 ---
 
@@ -81,9 +82,15 @@ All metrics carry three labels:
 | Name | Type | Description |
 |---|---|---|
 | `http_requests_total` | Counter | Total number of handled requests |
-| `http_request_duration_seconds` | Histogram | Time elapsed from first byte received to last byte sent |
-| `http_request_size_bytes` | Histogram | Inbound request size (headers + body) |
+| `http_request_duration_seconds` | Histogram | Elapsed time from middleware entry until downstream handlers return, including metric recording before the duration observation |
+| `http_request_size_bytes` | Histogram | Request body size: Content-Length when known, otherwise bytes consumed by the handler |
 | `http_response_size_bytes` | Histogram | Outbound response body size |
+
+Unknown-length bodies (for example, chunked uploads) are counted during handler
+reads without buffering or draining the body. Partial reads record only consumed
+bytes; unread bodies record zero. Headers and transfer framing are excluded.
+See [metrics behavior and verification](docs/metrics.md) for registration and
+maintenance details.
 
 Default histogram buckets:
 
@@ -107,7 +114,7 @@ Pass these to `Middleware(...)` or `MiddlewareWithMetrics(mc, ...)`.
 | `WithFilterRoutes([]string)` | — | Skip listed route patterns entirely |
 | `WithFilterPath(func)` | — | Custom per-request filter function |
 | `WithPathAggregator(func)` | — | Custom path-label mapping function |
-| `WithUnmatchedRouteHandling(bool)` | `true` | Count or ignore 404/unmatched routes |
+| `WithUnmatchedRouteHandling(bool)` | `true` | Apply special `/unmatched` labels to unmatched routes; disabling this keeps them counted |
 | `WithUnmatchedRouteGrouping(bool)` | `true` | Collapse all unmatched under `/unmatched/*` |
 
 ### Metrics handler options (`HandlerOption`)
@@ -116,7 +123,7 @@ Pass these to `GetMetricHandler(...)`.
 
 | Option | Description |
 |---|---|
-| `WithBasicAuth(username, password string)` | Require HTTP Basic Auth to access `/metrics` |
+| `WithBasicAuth(username, password string)` | Require HTTP Basic Auth when both credentials are non-empty |
 
 ### Metrics collection options (`MetricsOption`)
 
@@ -167,11 +174,13 @@ r.Use(ginprom.Middleware(
 
 ### Custom path aggregator
 
-Useful when you have path segments that are not Gin parameters but still
-produce high cardinality (e.g. UUIDs embedded in the path).
+This example preserves registered route patterns and groups unmatched requests
+by status. Disable special unmatched-route handling so the callback receives an
+empty route for unmatched requests; otherwise it receives `/unmatched/*` by default.
 
 ```go
 r.Use(ginprom.Middleware(
+    ginprom.WithUnmatchedRouteHandling(false),
     ginprom.WithPathAggregator(func(route, path string, statusCode int) string {
         if route != "" {
             return route
@@ -186,6 +195,12 @@ r.Use(ginprom.Middleware(
 ```
 
 ### Protect the metrics endpoint with Basic Auth
+
+Configure both username and password with non-empty values. If either value is
+empty, authentication is disabled and the endpoint is publicly accessible. Credential checks
+compare fixed-length SHA-256 digests in constant time. Serve the endpoint over
+HTTPS: this comparison does not encrypt credentials. See
+[authentication behavior](docs/metrics.md#basic-authentication) for details.
 
 ```go
 r.GET("/metrics", gin.WrapH(
@@ -240,12 +255,17 @@ r.Use(ginprom.Middleware(
 
 By default, requests to routes that are not registered in Gin (which would
 return 404) are still counted under the label `/unmatched/*` to keep
-cardinality bounded.  You can turn this off:
+cardinality bounded. Disabling special handling keeps these requests counted;
+the default aggregator uses `path_4xx`, `path_5xx`, or `missing_route` instead.
+To exclude unmatched requests, disable special handling and add a filter:
 
 ```go
 // Do not record metrics for unmatched routes at all
 r.Use(ginprom.Middleware(
     ginprom.WithUnmatchedRouteHandling(false),
+    ginprom.WithFilterPath(func(route, path string) bool {
+        return route == ""
+    }),
 ))
 
 // Record each unmatched path individually (may explode cardinality!)

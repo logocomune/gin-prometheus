@@ -70,10 +70,11 @@ func WithFilterPath(filter func(string, string) bool) Option {
 }
 
 // WithPathAggregator installs a custom function that maps a (route, path,
-// statusCode) triple to the label value used in all four metrics.  The
-// default implementation returns route when it is non-empty, "path_4xx" for
-// 4xx unmatched requests, "path_5xx" for 5xx unmatched ones, and
-// "missing_route" otherwise.
+// statusCode) triple to the label value used in all four metrics. Unmatched
+// routes are processed before this callback: by default route is "/unmatched/*".
+// The default aggregator returns non-empty routes unchanged. Its "path_4xx",
+// "path_5xx", and "missing_route" fallbacks apply to empty routes when unmatched
+// route handling is disabled.
 //
 // Use this option to normalise dynamic segments that Gin does not capture as
 // named parameters, or to further reduce metric cardinality.
